@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Bank Statement Analyzer</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; margin: 0; padding: 2em; background-color: #f4f7f6; color: #333; }
+        .container { max-width: 1200px; margin: auto; background: #fff; padding: 2em; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+        h1, h2, h3 { color: #0056b3; border-bottom: 2px solid #f0f0f0; padding-bottom: 0.3em; }
+        .results { margin-top: 2em; }
+        .summary-stats { display: flex; justify-content: space-around; background-color: #eef7ff; padding: 1em; border-radius: 8px; margin-bottom: 2em; }
+        .stat { text-align: center; padding: 1em; }
+        .stat p { margin: 0; font-size: 1.2em; font-weight: 600; }
+        .stat span { font-size: 0.9em; color: #555; }
+        .chart-container { width: 70%; max-width: 450px; margin: 2em auto; }
+        table { width: 100%; border-collapse: collapse; margin-top: 1em; }
+        th, td { border: 1px solid #ddd; padding: 12px; text-align: left; }
+        th { background-color: #0056b3; color: white; }
+        tr:nth-child(even) { background-color: #f9f9f9; }
+        .withdrawal { color: #dc3545; }
+        .deposit { color: #28a745; }
+        .balance { font-weight: bold; }
+        .upload-section { text-align: center; margin: 2em 0; padding: 2em; border: 2px dashed #ccc; border-radius: 8px; }
+        .error-message { color: #dc3545; padding: 1em; background: #f8d7da; border-radius: 4px; margin: 1em 0; }
+        .amount-cell { text-align: right; font-family: monospace; }
+        .action-buttons {
+            text-align: center;
+            margin: 2em 0;
+        }
+        
+        .export-button {
+            display: inline-block;
+            padding: 10px 20px;
+            background-color: #28a745;
+            color: white;
+            text-decoration: none;
+            border-radius: 5px;
+            font-weight: 500;
+            transition: background-color 0.2s;
+        }
+        
+        .export-button:hover {
+            background-color: #218838;
+        }
+        .remove-btn { 
+            padding: 4px 8px;
+            background-color: #dc3545;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.9em;
+        }
+        .remove-btn:hover {
+            background-color: #c82333;
+        }
+        .excluded { 
+            opacity: 0.5; 
+            text-decoration: line-through; 
+        }
+        .undo-btn {
+            padding: 4px 8px;
+            background-color: #6c757d;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.9em;
+            margin-left: 5px;
+        }
+        .undo-btn:hover {
+            background-color: #5a6268;
+        }
+        .channel-main {
+            font-weight: 600;
+            color: #2c3e50;
+            margin-bottom: 4px;
+        }
+        .channel-details {
+            font-size: 0.85em;
+            color: #666;
+        }
+        .transaction-details {
+            font-size: 0.9em;
+            color: #495057;
+            line-height: 1.4;
+        }
+        td {
+            vertical-align: top;
+            padding: 12px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Bank Statement Analyzer</h1>
+
+        <div class="upload-section">
+            <p>Upload your bank statement to analyze your transactions.</p>
+            <form method="post" action="/analyze" enctype="multipart/form-data">
+                <input type="file" name="file" accept=".pdf" required>
+                <button type="submit">Analyze Statement</button>
+            </form>
+        </div>
+
+        {% if results %}
+        <div class="results">
+            <div class="summary-stats">
+                <div class="stat">
+                    <span>Total Deposits</span>
+                    <p class="deposit" id="total-deposits">{{ "%.2f"|format(results.total_deposits) }} THB</p>
+                    <span>(<span id="deposit-count">{{ results.deposit_count }}</span> items)</span>
+                </div>
+                <div class="stat">
+                    <span>Total Withdrawals</span>
+                    <p class="withdrawal" id="total-withdrawals">{{ "%.2f"|format(results.total_withdrawals) }} THB</p>
+                    <span>(<span id="withdrawal-count">{{ results.withdrawal_count }}</span> items)</span>
+                </div>
+                <div class="stat">
+                    <span>Net Balance</span>
+                    <p class="balance {% if results.net_amount < 0 %}withdrawal{% else %}deposit{% endif %}" id="net-amount">
+                        {{ "%.2f"|format(results.net_amount) }} THB
+                    </p>
+                </div>
+                <div class="stat">
+                    <span>Ending Balance</span>
+                    <p class="balance" id="ending-balance">{{ "%.2f"|format(results.ending_balance) }} THB</p>
+                </div>
+            </div>
+
+            <div class="action-buttons">
+                <a href="{{ url_for('export_excel') }}" class="export-button">
+                    Export to Excel
+                </a>
+            </div>
+
+            {% if results.ai_insights %}
+            <h3>AI Analysis</h3>
+            <div class="ai-insights">
+                <pre>{{ results.ai_insights }}</pre>
+            </div>
+            {% endif %}
+            
+            <h3>Spending Categories</h3>
+            <div class="chart-container">
+                <canvas id="spendingChart"></canvas>
+            </div>
+
+            {% if transactions %}
+            <h3>Transaction Details</h3>
+            <table id="transactions-table">
+                <tr>
+                    <th>Date</th>
+                    <th>Time</th>
+                    <th>Description</th>
+                    <th>Withdrawal (THB)</th>
+                    <th>Deposit (THB)</th>
+                    <th>Balance (THB)</th>
+                    <th>Channel</th>
+                    <th>Details</th>
+                    <th>Actions</th>
+                </tr>
+                {% for t in transactions %}
+                <tr data-id="{{ loop.index0 }}" class="transaction-row">
+                    <td>{{ t.date }}</td>
+                    <td>{{ t.time if t.time != "00:00" else "" }}</td>
+                    <td>{{ t.description }}</td>
+                    <td class="amount-cell withdrawal">
+                        {% if t.amount < 0 %}
+                            {{ "%.2f"|format(t.amount|abs) }}
+                        {% endif %}
+                    </td>
+                    <td class="amount-cell deposit">
+                        {% if t.amount > 0 %}
+                            {{ "%.2f"|format(t.amount) }}
+                        {% endif %}
+                    </td>
+                    <td class="amount-cell balance">{{ "%.2f"|format(t.balance) }}</td>
+                    <td>
+                        {% if t.channel %}
+                            {% set channel_parts = t.channel.split(':') %}
+                            {% if channel_parts|length > 1 %}
+                                <div class="channel-main">{{ channel_parts[0]|trim }}</div>
+                                <div class="channel-details">{{ channel_parts[1:]|join(':')|trim }}</div>
+                            {% else %}
+                                <div class="channel-main">{{ t.channel }}</div>
+                            {% endif %}
+                        {% endif %}
+                    </td>
+                    <td class="transaction-details">
+                        {% if t.details %}
+                            {% set details_lines = t.details.split('\n') %}
+                            {% for line in details_lines %}
+                                {% if line|trim %}
+                                    {{ line|trim }}<br>
+                                {% endif %}
+                            {% endfor %}
+                        {% endif %}
+                    </td>
+                    <td>
+                        <button class="remove-btn" onclick="toggleTransaction({{ loop.index0 }}, this)">Remove</button>
+                    </td>
+                </tr>
+                {% endfor %}
+            </table>
+
+            <div id="changes-summary" style="margin-top: 2em; padding: 1em; background-color: #f8f9fa; border-radius: 8px; display: none;">
+                <h3>Changes Summary</h3>
+                <div class="summary-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 2em;">
+                    <div class="removed-transactions">
+                        <h4>Removed Transactions</h4>
+                        <table style="width: 100%;">
+                            <thead>
+                                <tr>
+                                    <th>Description</th>
+                                    <th>Amount (THB)</th>
+                                </tr>
+                            </thead>
+                            <tbody id="removed-transactions-list">
+                            </tbody>
+                            <tfoot>
+                                <tr>
+                                    <td><strong>Total Impact:</strong></td>
+                                    <td id="total-removed-amount">0.00 THB</td>
+                                </tr>
+                            </tfoot>
+                        </table>
+                    </div>
+                    <div class="impact-summary">
+                        <h4>Impact on Totals</h4>
+                        <table style="width: 100%;">
+                            <tr>
+                                <td>Original Total Deposits:</td>
+                                <td id="original-deposits" class="amount-cell deposit">0.00 THB</td>
+                            </tr>
+                            <tr>
+                                <td>Adjusted Total Deposits:</td>
+                                <td id="adjusted-deposits" class="amount-cell deposit">0.00 THB</td>
+                            </tr>
+                            <tr>
+                                <td>Original Total Withdrawals:</td>
+                                <td id="original-withdrawals" class="amount-cell withdrawal">0.00 THB</td>
+                            </tr>
+                            <tr>
+                                <td>Adjusted Total Withdrawals:</td>
+                                <td id="adjusted-withdrawals" class="amount-cell withdrawal">0.00 THB</td>
+                            </tr>
+                            <tr>
+                                <td><strong>Net Change:</strong></td>
+                                <td id="net-change" class="amount-cell">0.00 THB</td>
+                            </tr>
+                        </table>
+                    </div>
+                </div>
+            </div>
+            {% endif %}
+        </div>
+        
+        <script>
+            // Initialize chart
+            const ctx = document.getElementById('spendingChart');
+            let chart = new Chart(ctx, {
+                type: 'pie',
+                data: {
+                    labels: {{ results.chart_labels|tojson }},
+                    datasets: [{
+                        label: 'Spending (THB)',
+                        data: {{ results.chart_data|tojson }},
+                        backgroundColor: [
+                            '#29B6F6', '#66BB6A', '#FFA726', '#EF5350', '#AB47BC', 
+                            '#FF7043', '#8D6E63', '#78909C', '#FFEE58', '#42A5F5'
+                        ],
+                        hoverOffset: 4
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    plugins: {
+                        legend: {
+                            position: 'top',
+                        },
+                        title: {
+                            display: true,
+                            text: 'Spending by Category'
+                        }
+                    }
+                }
+            });
+
+            // Store original transaction data
+            const transactions = {{ transactions|tojson }};
+            let excludedTransactions = new Set();
+
+            // Calculate initial totals
+            let initialTotals = {
+                deposits: 0,
+                withdrawals: 0
+            };
+
+            transactions.forEach(t => {
+                if (t.amount > 0) {
+                    initialTotals.deposits += t.amount;
+                } else {
+                    initialTotals.withdrawals += Math.abs(t.amount);
+                }
+            });
+
+            // Update the original values in the impact summary
+            document.getElementById('original-deposits').textContent = initialTotals.deposits.toFixed(2) + ' THB';
+            document.getElementById('original-withdrawals').textContent = initialTotals.withdrawals.toFixed(2) + ' THB';
+
+            function updateChangesSummary() {
+                const changesSummary = document.getElementById('changes-summary');
+                const removedList = document.getElementById('removed-transactions-list');
+                
+                // Clear the current list
+                removedList.innerHTML = '';
+                
+                // Show the changes summary if there are excluded transactions
+                if (excludedTransactions.size > 0) {
+                    changesSummary.style.display = 'block';
+                    
+                    let totalRemovedAmount = 0;
+                    
+                    // Add each removed transaction to the list
+                    excludedTransactions.forEach(index => {
+                        const t = transactions[index];
+                        const row = document.createElement('tr');
+                        
+                        const descCell = document.createElement('td');
+                        descCell.textContent = t.description;
+                        
+                        const amountCell = document.createElement('td');
+                        amountCell.textContent = t.amount.toFixed(2) + ' THB';
+                        amountCell.className = t.amount < 0 ? 'withdrawal' : 'deposit';
+                        
+                        row.appendChild(descCell);
+                        row.appendChild(amountCell);
+                        removedList.appendChild(row);
+                        
+                        totalRemovedAmount += t.amount;
+                    });
+                    
+                    // Update the totals
+                    document.getElementById('total-removed-amount').textContent = 
+                        totalRemovedAmount.toFixed(2) + ' THB';
+                    
+                    // Update adjusted totals
+                    const currentTotals = getCurrentTotals();
+                    document.getElementById('adjusted-deposits').textContent = 
+                        currentTotals.deposits.toFixed(2) + ' THB';
+                    document.getElementById('adjusted-withdrawals').textContent = 
+                        currentTotals.withdrawals.toFixed(2) + ' THB';
+                    
+                    // Calculate and display net change
+                    const netChange = (currentTotals.deposits - currentTotals.withdrawals) - 
+                                   (initialTotals.deposits - initialTotals.withdrawals);
+                    const netChangeElement = document.getElementById('net-change');
+                    netChangeElement.textContent = netChange.toFixed(2) + ' THB';
+                    netChangeElement.className = 'amount-cell ' + (netChange < 0 ? 'withdrawal' : 'deposit');
+                } else {
+                    changesSummary.style.display = 'none';
+                }
+            }
+
+            function getCurrentTotals() {
+                let totals = {
+                    deposits: 0,
+                    withdrawals: 0
+                };
+                
+                transactions.forEach((t, index) => {
+                    if (!excludedTransactions.has(index)) {
+                        if (t.amount > 0) {
+                            totals.deposits += t.amount;
+                        } else {
+                            totals.withdrawals += Math.abs(t.amount);
+                        }
+                    }
+                });
+                
+                return totals;
+            }
+
+            function updateSummary() {
+                let totalDeposits = 0;
+                let totalWithdrawals = 0;
+                let depositCount = 0;
+                let withdrawalCount = 0;
+
+                transactions.forEach((t, index) => {
+                    if (!excludedTransactions.has(index)) {
+                        if (t.amount > 0) {
+                            totalDeposits += t.amount;
+                            depositCount++;
+                        } else {
+                            totalWithdrawals += Math.abs(t.amount);
+                            withdrawalCount++;
+                        }
+                    }
+                });
+
+                const netAmount = totalDeposits - totalWithdrawals;
+
+                // Update summary stats
+                document.getElementById('total-deposits').textContent = totalDeposits.toFixed(2) + ' THB';
+                document.getElementById('total-withdrawals').textContent = totalWithdrawals.toFixed(2) + ' THB';
+                document.getElementById('net-amount').textContent = netAmount.toFixed(2) + ' THB';
+                document.getElementById('deposit-count').textContent = depositCount;
+                document.getElementById('withdrawal-count').textContent = withdrawalCount;
+
+                // Update chart data
+                updateChart();
+            }
+
+            function updateChart() {
+                const categories = {};
+                
+                transactions.forEach((t, index) => {
+                    if (!excludedTransactions.has(index) && t.amount < 0) {
+                        const amount = Math.abs(t.amount);
+                        const description = t.description.toLowerCase();
+                        
+                        if (description.includes('food') || description.includes('restaurant')) {
+                            categories['Food & Dining'] = (categories['Food & Dining'] || 0) + amount;
+                        } else if (description.includes('transfer')) {
+                            categories['Transfers'] = (categories['Transfers'] || 0) + amount;
+                        } else if (description.includes('transport')) {
+                            categories['Transportation'] = (categories['Transportation'] || 0) + amount;
+                        } else if (description.includes('shop') || description.includes('store')) {
+                            categories['Shopping'] = (categories['Shopping'] || 0) + amount;
+                        } else if (description.includes('bill') || description.includes('utility')) {
+                            categories['Bills & Utilities'] = (categories['Bills & Utilities'] || 0) + amount;
+                        } else {
+                            categories['Other'] = (categories['Other'] || 0) + amount;
+                        }
+                    }
+                });
+
+                // Update chart
+                chart.data.labels = Object.keys(categories);
+                chart.data.datasets[0].data = Object.values(categories);
+                chart.update();
+            }
+
+            function toggleTransaction(index, button) {
+                const row = button.closest('tr');
+                if (excludedTransactions.has(index)) {
+                    // Undo exclusion
+                    excludedTransactions.delete(index);
+                    row.classList.remove('excluded');
+                    button.textContent = 'Remove';
+                    button.classList.remove('undo-btn');
+                    button.classList.add('remove-btn');
+                } else {
+                    // Exclude transaction
+                    excludedTransactions.add(index);
+                    row.classList.add('excluded');
+                    button.textContent = 'Undo';
+                    button.classList.remove('remove-btn');
+                    button.classList.add('undo-btn');
+                }
+                updateSummary();
+                updateChangesSummary();
+            }
+        </script>
+        {% endif %}
+    </div>
+</body>
+</html>
