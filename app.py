@@ -8,6 +8,10 @@ import pdfplumber
 from datetime import datetime
 import pandas as pd
 import io
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # NEW: Import the Google AI library
 import google.generativeai as genai
@@ -16,24 +20,24 @@ import google.generativeai as genai
 app = Flask(__name__)
 UPLOAD_FOLDER = 'uploads'
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-app.secret_key = 'your-secret-key-here'  # Required for flashing messages
+app.secret_key = os.getenv('FLASK_SECRET_KEY', 'your-secret-key-here')  # Required for flashing messages
 
-# --- NEW: Configure the AI with your API Key ---
-# IMPORTANT: Replace "YOUR_API_KEY" with the key you got from Google AI Studio
-# For better security, use environment variables in a real application
-try:
-    genai.configure(api_key="AIzaSyDx62phnaGB8aadegCzAKqE92QP4e1bxRo") 
-    model = genai.GenerativeModel('gemini-1.5-flash') # Use the fast and efficient Flash model
-    print("AI Model configured successfully.")
-except Exception as e:
-    print(f"Error configuring AI model: {e}")
-    model = None
+# Create uploads directory if it doesn't exist
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 # Configure Gemini AI
 GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
-genai.configure(api_key=GOOGLE_API_KEY)
-
-# --- The old get_category_keywords() function is NO LONGER NEEDED ---
+if not GOOGLE_API_KEY:
+    print("Warning: GOOGLE_API_KEY not found in environment variables")
+    model = None
+else:
+    try:
+        genai.configure(api_key=GOOGLE_API_KEY)
+        model = genai.GenerativeModel('gemini-1.5-flash')  # Use the fast and efficient Flash model
+        print("AI Model configured successfully.")
+    except Exception as e:
+        print(f"Error configuring AI model: {e}")
+        model = None
 
 # --- NEW: AI-powered categorization function ---
 def get_category_with_ai(description):
@@ -527,7 +531,7 @@ def export_excel():
 
 @app.route('/analyze', methods=['POST'])
 def analyze():
-    global last_results  # Add this line to use the global variable
+    global last_results
     
     if 'file' not in request.files:
         return render_template('index.html', error='No file uploaded')
@@ -540,21 +544,43 @@ def analyze():
         return render_template('index.html', error='Please upload a PDF file')
     
     try:
+        # Ensure upload directory exists
+        os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+        
+        # Generate a unique filename to avoid conflicts
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        safe_filename = f"statement_{timestamp}.pdf"
+        filepath = os.path.join(UPLOAD_FOLDER, safe_filename)
+        
         # Save the uploaded file
-        filepath = os.path.join(UPLOAD_FOLDER, file.filename)
-        file.save(filepath)
-        print(f"Saving file to: {filepath}")
+        try:
+            file.save(filepath)
+            print(f"Saving file to: {filepath}")
+        except Exception as save_error:
+            print(f"Error saving file: {str(save_error)}")
+            return render_template('index.html', error=f"Error saving file: Please try again")
         
         print("Starting PDF text extraction...")
         print(f"\nAttempting to open PDF at: {filepath}")
         
         # Extract text from PDF
-        with pdfplumber.open(filepath) as pdf:
-            print(f"Successfully opened PDF with {len(pdf.pages)} pages\n")
-            text = ''
-            for i, page in enumerate(pdf.pages, 1):
-                print(f"\nProcessing page {i}")
-                text += page.extract_text() + '\n'
+        try:
+            with pdfplumber.open(filepath) as pdf:
+                print(f"Successfully opened PDF with {len(pdf.pages)} pages\n")
+                text = ''
+                for i, page in enumerate(pdf.pages, 1):
+                    print(f"\nProcessing page {i}")
+                    text += page.extract_text() + '\n'
+        except Exception as pdf_error:
+            print(f"Error reading PDF: {str(pdf_error)}")
+            return render_template('index.html', error="Error reading PDF file: Please ensure it's a valid bank statement")
+        finally:
+            # Clean up the uploaded file regardless of success or failure
+            try:
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+            except Exception as cleanup_error:
+                print(f"Warning: Could not remove temporary file {filepath}: {cleanup_error}")
         
         print("\n=== Extracted Text Sample ===")
         print("First 500 characters:")
@@ -595,17 +621,17 @@ Transaction summary:
                 print(f"Error getting AI insights: {e}")
                 results['ai_insights'] = None
         
-        # Clean up the uploaded file
-        try:
-            os.remove(filepath)
-        except Exception as e:
-            print(f"Warning: Could not remove temporary file {filepath}: {e}")
-        
         return render_template('index.html', results=results, transactions=transactions)
         
     except Exception as e:
         print(f"Error processing file: {str(e)}")
         print(f"Full traceback: {traceback.format_exc()}")
+        # Clean up in case of error
+        try:
+            if 'filepath' in locals() and os.path.exists(filepath):
+                os.remove(filepath)
+        except Exception as cleanup_error:
+            print(f"Warning: Could not remove temporary file during error cleanup: {cleanup_error}")
         return render_template('index.html', error=f"Error processing the PDF file: {str(e)}")
 
 if __name__ == "__main__":
