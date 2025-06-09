@@ -3,7 +3,7 @@ import re
 from collections import defaultdict
 import os
 import traceback  # Add this for detailed error tracking
-from flask import Flask, request, render_template, redirect, url_for, flash, send_file
+from flask import Flask, request, render_template, redirect, url_for, flash, send_file, session
 import pdfplumber
 from datetime import datetime
 import pandas as pd
@@ -73,15 +73,20 @@ def get_category_with_ai(description):
 
 
 # --- PDF Processing Logic ---
-def extract_text_from_pdf(pdf_path):
+def extract_text_from_pdf(pdf_path, password=None):
     """Extract text from PDF with focus on table structure preservation."""
     try:
-        print(f"\nAttempting to open PDF at: {pdf_path}")
-        if not os.path.exists(pdf_path):
-            print(f"Error: PDF file not found at {pdf_path}")
-            return None
-
         doc = fitz.open(pdf_path)
+        # Check if the PDF is password-protected
+        if doc.needs_pass:
+            if not password:
+                doc.close()
+                return "PASSWORD_REQUIRED"
+            # Try to authenticate with the provided password
+            if not doc.authenticate(password):
+                doc.close()
+                return "INCORRECT_PASSWORD"
+
         print(f"Successfully opened PDF with {len(doc)} pages")
 
         all_text = []
@@ -533,88 +538,75 @@ def export_excel():
 def analyze():
     global last_results
     
-    if 'file' not in request.files:
-        return render_template('index.html', error='No file uploaded')
-    
-    file = request.files['file']
-    if file.filename == '':
-        return render_template('index.html', error='No file selected')
-    
-    if not file.filename.endswith('.pdf'):
-        return render_template('index.html', error='Please upload a PDF file')
-    
-    try:
-        # Ensure upload directory exists
-        os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+    # Use session to handle password retries for the same file
+    if 'file' in request.files and request.files['file'].filename:
+        file = request.files['file']
         
-        # Generate a unique filename to avoid conflicts
+        if not file.filename.lower().endswith('.pdf'):
+            flash('Please upload a PDF file', 'error')
+            return redirect(url_for('index'))
+        
+        # Save the new file and store its path in the session
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         safe_filename = f"statement_{timestamp}.pdf"
         filepath = os.path.join(UPLOAD_FOLDER, safe_filename)
+        file.save(filepath)
+        session['filepath'] = filepath
+    
+    elif 'filepath' in session:
+        filepath = session['filepath']
+    else:
+        flash('No file selected. Please upload a statement.', 'error')
+        return redirect(url_for('index'))
+
+    if not os.path.exists(filepath):
+        session.pop('filepath', None)
+        flash('File not found. Please upload again.', 'error')
+        return redirect(url_for('index'))
         
-        # Save the uploaded file
-        try:
-            file.save(filepath)
-            print(f"Saving file to: {filepath}")
-        except Exception as save_error:
-            print(f"Error saving file: {str(save_error)}")
-            return render_template('index.html', error=f"Error saving file: Please try again")
+    password = request.form.get('password')
+    text_extraction_result = None # To control file cleanup
+    
+    try:
+        text_extraction_result = extract_text_from_pdf(filepath, password=password)
+
+        if text_extraction_result == "PASSWORD_REQUIRED":
+            # The file is protected, so we ask the user for a password.
+            # The filepath remains in the session for the next attempt.
+            return "Password required", 403
         
-        print("Starting PDF text extraction...")
-        print(f"\nAttempting to open PDF at: {filepath}")
+        if text_extraction_result == "INCORRECT_PASSWORD":
+            # The password was wrong. Ask again.
+            return "Incorrect password", 403
+
+        if text_extraction_result is None:
+            flash("Could not process the PDF. It might be corrupted or in an unsupported format.", 'error')
+            return redirect(url_for('index'))
         
-        # Extract text from PDF
-        try:
-            with pdfplumber.open(filepath) as pdf:
-                print(f"Successfully opened PDF with {len(pdf.pages)} pages\n")
-                text = ''
-                for i, page in enumerate(pdf.pages, 1):
-                    print(f"\nProcessing page {i}")
-                    text += page.extract_text() + '\n'
-        except Exception as pdf_error:
-            print(f"Error reading PDF: {str(pdf_error)}")
-            return render_template('index.html', error="Error reading PDF file: Please ensure it's a valid bank statement")
-        finally:
-            # Clean up the uploaded file regardless of success or failure
-            try:
-                if os.path.exists(filepath):
-                    os.remove(filepath)
-            except Exception as cleanup_error:
-                print(f"Warning: Could not remove temporary file {filepath}: {cleanup_error}")
-        
-        print("\n=== Extracted Text Sample ===")
-        print("First 500 characters:")
-        print(text[:500])
-        
-        print("\nStarting transaction parsing...")
-        results = parse_transactions(text)
-        transactions = results['transactions']
+        # --- Success ---
+        results = parse_transactions(text_extraction_result)
+        transactions = results.get('transactions', [])
         
         if not transactions:
-            return render_template('index.html', error="No transactions found in PDF")
+            flash("No transactions were found in the PDF. Please check the file.", 'error')
+            return redirect(url_for('index'))
         
-        print("Analyzing spending patterns...")
         chart_labels, chart_data = analyze_spending(transactions)
-        
-        # Add chart data to results
         results['chart_labels'] = chart_labels
         results['chart_data'] = chart_data
         
-        # Store results for export
         last_results = results
         
-        # Get AI insights if API key is available
         if GOOGLE_API_KEY:
             try:
                 model = genai.GenerativeModel('gemini-pro')
-                prompt = f"""Analyze these bank transactions and provide insights about spending patterns, unusual transactions, and suggestions for financial management. Focus on key patterns and actionable advice. Keep it concise (max 3-4 bullet points).
+                prompt = f"""Analyze these bank transactions and provide insights on spending patterns, unusual transactions, and suggestions for financial management. Focus on key patterns and actionable advice. Keep it concise (max 3-4 bullet points).
 
 Transaction summary:
 - Total withdrawals: {results['total_withdrawals']} THB ({results['withdrawal_count']} transactions)
 - Total deposits: {results['total_deposits']} THB ({results['deposit_count']} transactions)
 - Net amount: {results['net_amount']} THB
 - Ending balance: {results['ending_balance']} THB"""
-
                 response = model.generate_content(prompt)
                 results['ai_insights'] = response.text
             except Exception as e:
@@ -623,16 +615,14 @@ Transaction summary:
         
         return render_template('index.html', results=results, transactions=transactions)
         
-    except Exception as e:
-        print(f"Error processing file: {str(e)}")
-        print(f"Full traceback: {traceback.format_exc()}")
-        # Clean up in case of error
-        try:
-            if 'filepath' in locals() and os.path.exists(filepath):
-                os.remove(filepath)
-        except Exception as cleanup_error:
-            print(f"Warning: Could not remove temporary file during error cleanup: {cleanup_error}")
-        return render_template('index.html', error=f"Error processing the PDF file: {str(e)}")
+    finally:
+        # Clean up the file if the process is complete (success or fatal error).
+        # On password prompts, we keep the file for the next attempt.
+        if text_extraction_result not in ["PASSWORD_REQUIRED", "INCORRECT_PASSWORD"]:
+            if 'filepath' in session:
+                stored_path = session.pop('filepath', None)
+                if stored_path and os.path.exists(stored_path):
+                    os.remove(stored_path)
 
 if __name__ == "__main__":
     if not os.path.exists(UPLOAD_FOLDER):

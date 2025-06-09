@@ -4,6 +4,8 @@
     <meta charset="UTF-8">
     <title>Bank Statement Analyzer</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- Bootstrap CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; margin: 0; padding: 2em; background-color: #f4f7f6; color: #333; }
         .container { max-width: 1200px; margin: auto; background: #fff; padding: 2em; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
@@ -90,19 +92,55 @@
             vertical-align: top;
             padding: 12px;
         }
+        .modal-body .invalid-feedback {
+            display: none; /* Hidden by default */
+        }
     </style>
 </head>
 <body>
+    <!-- Password Modal -->
+    <div class="modal fade" id="passwordModal" tabindex="-1" aria-labelledby="passwordModalLabel" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="passwordModalLabel">PDF Password Required</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <form id="passwordForm">
+                    <div class="modal-body">
+                        <p>This file is password-protected. Please enter the password to continue.</p>
+                        <input type="password" id="pdfPassword" class="form-control" placeholder="Enter Password" required>
+                        <div id="passwordError" class="invalid-feedback">
+                            Incorrect password. Please try again.
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                        <button type="submit" class="btn btn-primary">Submit</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
     <div class="container">
         <h1>Bank Statement Analyzer</h1>
 
         <div class="upload-section">
             <p>Upload your bank statement to analyze your transactions.</p>
-            <form method="post" action="/analyze" enctype="multipart/form-data">
+            <form id="uploadForm" method="post" action="/analyze" enctype="multipart/form-data">
                 <input type="file" name="file" accept=".pdf" required>
-                <button type="submit">Analyze Statement</button>
+                <button type="submit" class=" btn btn-primary">Analyze Statement</button>
             </form>
         </div>
+        
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="alert alert-danger mt-3">{{ message }}</div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
 
         {% if results %}
         <div class="results">
@@ -257,16 +295,101 @@
             {% endif %}
         </div>
         
+        <!-- Pass data to JS -->
         <script>
+            window.serverData = {
+                chartLabels: {{ results.chart_labels|tojson }},
+                chartData: {{ results.chart_data|tojson }},
+                transactions: {{ transactions|tojson }}
+            };
+        </script>
+        {% endif %}
+    </div>
+
+    <!-- Bootstrap JS -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+
+    <!-- Main Application Script -->
+    <script>
+    document.addEventListener('DOMContentLoaded', function () {
+        const uploadForm = document.getElementById('uploadForm');
+        const passwordForm = document.getElementById('passwordForm');
+        const passwordModalEl = document.getElementById('passwordModal');
+        const passwordModal = new bootstrap.Modal(passwordModalEl);
+        const passwordInput = document.getElementById('pdfPassword');
+        const passwordError = document.getElementById('passwordError');
+
+        // --- Upload Logic ---
+        uploadForm.addEventListener('submit', async function (e) {
+            e.preventDefault();
+            const formData = new FormData(uploadForm);
+            
+            try {
+                const response = await fetch('/analyze', {
+                    method: 'POST',
+                    body: formData,
+                });
+
+                if (response.status === 403) {
+                    passwordInput.value = '';
+                    passwordError.style.display = 'none';
+                    passwordModal.show();
+                } else if (response.ok) {
+                    const html = await response.text();
+                    document.open();
+                    document.write(html);
+                    document.close();
+                } else {
+                    window.location.reload();
+                }
+            } catch (err) {
+                console.error('An error occurred during upload:', err);
+            }
+        });
+
+        // --- Password Submission Logic ---
+        passwordForm.addEventListener('submit', async function (e) {
+            e.preventDefault();
+            const formData = new FormData();
+            formData.append('password', passwordInput.value);
+            
+            try {
+                const response = await fetch('/analyze', {
+                    method: 'POST',
+                    body: formData,
+                });
+
+                if (response.status === 403) {
+                    passwordInput.value = '';
+                    passwordError.style.display = 'block';
+                } else if (response.ok) {
+                    passwordModal.hide();
+                    const html = await response.text();
+                    document.open();
+                    document.write(html);
+                    document.close();
+                } else {
+                    window.location.reload();
+                }
+            } catch (err) {
+                console.error('An error occurred during password submission:', err);
+            }
+        });
+        
+        // --- Chart and Transaction Logic (runs only if results are on the page) ---
+        if (window.serverData) {
+            const transactions = window.serverData.transactions;
+            let excludedTransactions = new Set();
+
             // Initialize chart
-            const ctx = document.getElementById('spendingChart');
-            let chart = new Chart(ctx, {
+            const ctx = document.getElementById('spendingChart').getContext('2d');
+            const chart = new Chart(ctx, {
                 type: 'pie',
                 data: {
-                    labels: {{ results.chart_labels|tojson }},
+                    labels: window.serverData.chartLabels,
                     datasets: [{
                         label: 'Spending (THB)',
-                        data: {{ results.chart_data|tojson }},
+                        data: window.serverData.chartData,
                         backgroundColor: [
                             '#29B6F6', '#66BB6A', '#FFA726', '#EF5350', '#AB47BC', 
                             '#FF7043', '#8D6E63', '#78909C', '#FFEE58', '#42A5F5'
@@ -277,85 +400,42 @@
                 options: {
                     responsive: true,
                     plugins: {
-                        legend: {
-                            position: 'top',
-                        },
-                        title: {
-                            display: true,
-                            text: 'Spending by Category'
-                        }
+                        legend: { position: 'top' },
+                        title: { display: true, text: 'Spending by Category' }
                     }
                 }
             });
 
-            // Store original transaction data
-            const transactions = {{ transactions|tojson }};
-            let excludedTransactions = new Set();
-
-            // Calculate initial totals
-            let initialTotals = {
-                deposits: 0,
-                withdrawals: 0
-            };
-
+            // Calculate initial totals for the 'Changes Summary'
+            const initialTotals = { deposits: 0, withdrawals: 0 };
             transactions.forEach(t => {
-                if (t.amount > 0) {
-                    initialTotals.deposits += t.amount;
-                } else {
-                    initialTotals.withdrawals += Math.abs(t.amount);
-                }
+                if (t.amount > 0) initialTotals.deposits += t.amount;
+                else initialTotals.withdrawals += Math.abs(t.amount);
             });
-
-            // Update the original values in the impact summary
             document.getElementById('original-deposits').textContent = initialTotals.deposits.toFixed(2) + ' THB';
             document.getElementById('original-withdrawals').textContent = initialTotals.withdrawals.toFixed(2) + ' THB';
 
             function updateChangesSummary() {
                 const changesSummary = document.getElementById('changes-summary');
                 const removedList = document.getElementById('removed-transactions-list');
-                
-                // Clear the current list
                 removedList.innerHTML = '';
                 
-                // Show the changes summary if there are excluded transactions
                 if (excludedTransactions.size > 0) {
                     changesSummary.style.display = 'block';
-                    
                     let totalRemovedAmount = 0;
-                    
-                    // Add each removed transaction to the list
                     excludedTransactions.forEach(index => {
                         const t = transactions[index];
                         const row = document.createElement('tr');
-                        
-                        const descCell = document.createElement('td');
-                        descCell.textContent = t.description;
-                        
-                        const amountCell = document.createElement('td');
-                        amountCell.textContent = t.amount.toFixed(2) + ' THB';
-                        amountCell.className = t.amount < 0 ? 'withdrawal' : 'deposit';
-                        
-                        row.appendChild(descCell);
-                        row.appendChild(amountCell);
+                        row.innerHTML = `<td>${t.description}</td><td class="${t.amount < 0 ? 'withdrawal' : 'deposit'}">${t.amount.toFixed(2)} THB</td>`;
                         removedList.appendChild(row);
-                        
                         totalRemovedAmount += t.amount;
                     });
                     
-                    // Update the totals
-                    document.getElementById('total-removed-amount').textContent = 
-                        totalRemovedAmount.toFixed(2) + ' THB';
-                    
-                    // Update adjusted totals
+                    document.getElementById('total-removed-amount').textContent = totalRemovedAmount.toFixed(2) + ' THB';
                     const currentTotals = getCurrentTotals();
-                    document.getElementById('adjusted-deposits').textContent = 
-                        currentTotals.deposits.toFixed(2) + ' THB';
-                    document.getElementById('adjusted-withdrawals').textContent = 
-                        currentTotals.withdrawals.toFixed(2) + ' THB';
-                    
-                    // Calculate and display net change
-                    const netChange = (currentTotals.deposits - currentTotals.withdrawals) - 
-                                   (initialTotals.deposits - initialTotals.withdrawals);
+                    document.getElementById('adjusted-deposits').textContent = currentTotals.deposits.toFixed(2) + ' THB';
+                    document.getElementById('adjusted-withdrawals').textContent = currentTotals.withdrawals.toFixed(2) + ' THB';
+                    const netChange = (currentTotals.deposits - currentTotals.withdrawals) - (initialTotals.deposits - initialTotals.withdrawals);
                     const netChangeElement = document.getElementById('net-change');
                     netChangeElement.textContent = netChange.toFixed(2) + ' THB';
                     netChangeElement.className = 'amount-cell ' + (netChange < 0 ? 'withdrawal' : 'deposit');
@@ -365,96 +445,58 @@
             }
 
             function getCurrentTotals() {
-                let totals = {
-                    deposits: 0,
-                    withdrawals: 0
-                };
-                
+                const totals = { deposits: 0, withdrawals: 0 };
                 transactions.forEach((t, index) => {
                     if (!excludedTransactions.has(index)) {
-                        if (t.amount > 0) {
-                            totals.deposits += t.amount;
-                        } else {
-                            totals.withdrawals += Math.abs(t.amount);
-                        }
+                        if (t.amount > 0) totals.deposits += t.amount;
+                        else totals.withdrawals += Math.abs(t.amount);
                     }
                 });
-                
                 return totals;
             }
 
             function updateSummary() {
-                let totalDeposits = 0;
-                let totalWithdrawals = 0;
-                let depositCount = 0;
-                let withdrawalCount = 0;
+                const currentTotals = getCurrentTotals();
+                const depositCount = transactions.filter((t, i) => !excludedTransactions.has(i) && t.amount > 0).length;
+                const withdrawalCount = transactions.filter((t, i) => !excludedTransactions.has(i) && t.amount < 0).length;
+                const netAmount = currentTotals.deposits - currentTotals.withdrawals;
 
-                transactions.forEach((t, index) => {
-                    if (!excludedTransactions.has(index)) {
-                        if (t.amount > 0) {
-                            totalDeposits += t.amount;
-                            depositCount++;
-                        } else {
-                            totalWithdrawals += Math.abs(t.amount);
-                            withdrawalCount++;
-                        }
-                    }
-                });
-
-                const netAmount = totalDeposits - totalWithdrawals;
-
-                // Update summary stats
-                document.getElementById('total-deposits').textContent = totalDeposits.toFixed(2) + ' THB';
-                document.getElementById('total-withdrawals').textContent = totalWithdrawals.toFixed(2) + ' THB';
+                document.getElementById('total-deposits').textContent = currentTotals.deposits.toFixed(2) + ' THB';
+                document.getElementById('total-withdrawals').textContent = currentTotals.withdrawals.toFixed(2) + ' THB';
                 document.getElementById('net-amount').textContent = netAmount.toFixed(2) + ' THB';
                 document.getElementById('deposit-count').textContent = depositCount;
                 document.getElementById('withdrawal-count').textContent = withdrawalCount;
-
-                // Update chart data
                 updateChart();
             }
 
             function updateChart() {
                 const categories = {};
-                
                 transactions.forEach((t, index) => {
                     if (!excludedTransactions.has(index) && t.amount < 0) {
                         const amount = Math.abs(t.amount);
                         const description = t.description.toLowerCase();
-                        
-                        if (description.includes('food') || description.includes('restaurant')) {
-                            categories['Food & Dining'] = (categories['Food & Dining'] || 0) + amount;
-                        } else if (description.includes('transfer')) {
-                            categories['Transfers'] = (categories['Transfers'] || 0) + amount;
-                        } else if (description.includes('transport')) {
-                            categories['Transportation'] = (categories['Transportation'] || 0) + amount;
-                        } else if (description.includes('shop') || description.includes('store')) {
-                            categories['Shopping'] = (categories['Shopping'] || 0) + amount;
-                        } else if (description.includes('bill') || description.includes('utility')) {
-                            categories['Bills & Utilities'] = (categories['Bills & Utilities'] || 0) + amount;
-                        } else {
-                            categories['Other'] = (categories['Other'] || 0) + amount;
-                        }
+                        if (description.includes('food') || description.includes('restaurant')) categories['Food & Dining'] = (categories['Food & Dining'] || 0) + amount;
+                        else if (description.includes('transfer')) categories['Transfers'] = (categories['Transfers'] || 0) + amount;
+                        else if (description.includes('transport')) categories['Transportation'] = (categories['Transportation'] || 0) + amount;
+                        else if (description.includes('shop') || description.includes('store')) categories['Shopping'] = (categories['Shopping'] || 0) + amount;
+                        else if (description.includes('bill') || description.includes('utility')) categories['Bills & Utilities'] = (categories['Bills & Utilities'] || 0) + amount;
+                        else categories['Other'] = (categories['Other'] || 0) + amount;
                     }
                 });
-
-                // Update chart
                 chart.data.labels = Object.keys(categories);
                 chart.data.datasets[0].data = Object.values(categories);
                 chart.update();
             }
 
-            function toggleTransaction(index, button) {
+            window.toggleTransaction = function (index, button) {
                 const row = button.closest('tr');
                 if (excludedTransactions.has(index)) {
-                    // Undo exclusion
                     excludedTransactions.delete(index);
                     row.classList.remove('excluded');
                     button.textContent = 'Remove';
                     button.classList.remove('undo-btn');
                     button.classList.add('remove-btn');
                 } else {
-                    // Exclude transaction
                     excludedTransactions.add(index);
                     row.classList.add('excluded');
                     button.textContent = 'Undo';
@@ -463,9 +505,9 @@
                 }
                 updateSummary();
                 updateChangesSummary();
-            }
-        </script>
-        {% endif %}
-    </div>
+            };
+        }
+    });
+    </script>
 </body>
 </html>
